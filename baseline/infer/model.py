@@ -411,109 +411,6 @@ class RankMixerBlock(nn.Module):
         Q_boost = self.post_norm(Q_boost)
         return Q_boost
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        norm = x.pow(2).mean(dim=-1, keepdim=True).sqrt() + self.eps
-        return x / norm * self.weight
-
-
-class SwiGLUPerTokenV2(nn.Module):
-    def __init__(self, num_head: int, in_dim: int, out_dim: int):
-        super().__init__()
-        self.w1 = nn.Parameter(torch.randn(num_head, in_dim, out_dim) * 0.02)
-        self.b1 = nn.Parameter(torch.zeros(num_head, out_dim))
-        self.w2 = nn.Parameter(torch.randn(num_head, in_dim, out_dim) * 0.02)
-        self.b2 = nn.Parameter(torch.zeros(num_head, out_dim))
-
-    def forward(self, x):
-        #logging.info(f"swi_x={x.shape}")
-        x1 = torch.einsum('bnd,ndu->bnu', x, self.w1) + self.b1.unsqueeze(0)
-        x2 = torch.einsum('bnd,ndu->bnu', x, self.w2) + self.b2.unsqueeze(0)
-        #logging.info(f"swi_x_after={x2.shape}")
-        return x1 * torch.sigmoid(x1) * x2
-
-
-class RankMixerV3(nn.Module):
-    """
-    兼容你原有接口的 RankMixerV3
-    接口完全对齐：d_model, n_total, hidden_mult, dropout, mode
-    """
-    def __init__(
-        self,
-        d_model: int,          # 原接口 ✅
-        n_total: int,          # 原接口 ✅ (T)
-        hidden_mult: int = 4,  # 原接口 ✅ (用来自动算 head_dim)
-        dropout: float = 0.0,  # 原接口 ✅ (兼容用)
-        mode: str = 'full',    # 原接口 ✅
-        layer_num: int = 2,    # v3 固定2层
-        in_norm: bool = True
-    ):
-        super().__init__()
-        self.D = d_model
-        self.T = n_total
-        self.mode = mode
-
-        # --- 自动计算 head_dim（兼容旧代码，不用手动传）---
-        self.num_heads = hidden_mult
-        self.head_dim = d_model // self.num_heads
-        assert self.num_heads * self.head_dim == d_model, "d_model must be divisible by hidden_mult"
-
-        self.in_norm = in_norm
-        if self.in_norm:
-            self.in_rms = RMSNorm(d_model)
-
-        # 堆叠 layer_num 层
-        self.layers = nn.ModuleList()
-        for _ in range(layer_num):
-            self.layers.append(nn.ModuleDict({
-                "mix_swiglu": SwiGLUPerTokenV2(
-                    num_head=self.num_heads,
-                    in_dim=self.T * self.head_dim,
-                    out_dim=self.T * self.head_dim
-                ),
-                "mix_rms": RMSNorm(self.T * self.head_dim),
-
-                "revert_swiglu": SwiGLUPerTokenV2(
-                    num_head=self.T,
-                    in_dim=d_model,
-                    out_dim=d_model
-                ),
-                "revert_rms": RMSNorm(d_model),
-            }))
-
-    def forward(self, Q: torch.Tensor) -> torch.Tensor:
-        if self.mode == 'none':
-            return Q
-
-        B, T, D = Q.shape #[B, 16, 64]
-        X = Q
-
-        if self.in_norm:
-            X = self.in_rms(X)
-
-        for layer in self.layers:
-            # ===================== Mixing =====================
-            H_space = X.reshape(B, T, self.num_heads, self.head_dim)
-            H_space = H_space.permute(0, 2, 1, 3)
-            H_space = H_space.reshape(B, self.num_heads, T * self.head_dim)
-
-            H_mix = layer["mix_swiglu"](H_space)
-            H_next = layer["mix_rms"](H_mix + H_space)
-
-            # ===================== Reverting =====================
-            X_revert = H_next.reshape(B, self.num_heads, T, self.head_dim)
-            X_revert = X_revert.permute(0, 2, 1, 3)
-            X_revert = X_revert.reshape(B, T, D)
-
-            X_out = layer["revert_swiglu"](X_revert)
-            X = layer["revert_rms"](X_out + X)
-
-        return X
 
 class MultiSeqQueryGenerator(nn.Module):
     """Multi-sequence query generation module.
@@ -715,6 +612,111 @@ class TransformerEncoder(nn.Module):
         x = residual + x
 
         return x, key_padding_mask
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = x.pow(2).mean(dim=-1, keepdim=True).sqrt() + self.eps
+        return x / norm * self.weight
+
+
+class SwiGLUPerTokenV2(nn.Module):
+    def __init__(self, num_head: int, in_dim: int, out_dim: int):
+        super().__init__()
+        self.w1 = nn.Parameter(torch.randn(num_head, in_dim, out_dim) * 0.02)
+        self.b1 = nn.Parameter(torch.zeros(num_head, out_dim))
+        self.w2 = nn.Parameter(torch.randn(num_head, in_dim, out_dim) * 0.02)
+        self.b2 = nn.Parameter(torch.zeros(num_head, out_dim))
+
+    def forward(self, x):
+        #logging.info(f"swi_x={x.shape}")
+        x1 = torch.einsum('bnd,ndu->bnu', x, self.w1) + self.b1.unsqueeze(0)
+        x2 = torch.einsum('bnd,ndu->bnu', x, self.w2) + self.b2.unsqueeze(0)
+        #logging.info(f"swi_x_after={x2.shape}")
+        return x1 * torch.sigmoid(x1) * x2
+
+
+class RankMixerV3(nn.Module):
+    """
+    兼容你原有接口的 RankMixerV3
+    接口完全对齐：d_model, n_total, hidden_mult, dropout, mode
+    """
+    def __init__(
+        self,
+        d_model: int,          # 原接口 ✅
+        n_total: int,          # 原接口 ✅ (T)
+        hidden_mult: int = 4,  # 原接口 ✅ (用来自动算 head_dim)
+        dropout: float = 0.0,  # 原接口 ✅ (兼容用)
+        mode: str = 'full',    # 原接口 ✅
+        layer_num: int = 2,    # v3 固定2层
+        in_norm: bool = True
+    ):
+        super().__init__()
+        self.D = d_model
+        self.T = n_total
+        self.mode = mode
+
+        # --- 自动计算 head_dim（兼容旧代码，不用手动传）---
+        self.num_heads = hidden_mult
+        self.head_dim = d_model // self.num_heads
+        assert self.num_heads * self.head_dim == d_model, "d_model must be divisible by hidden_mult"
+
+        self.in_norm = in_norm
+        if self.in_norm:
+            self.in_rms = RMSNorm(d_model)
+
+        # 堆叠 layer_num 层
+        self.layers = nn.ModuleList()
+        for _ in range(layer_num):
+            self.layers.append(nn.ModuleDict({
+                "mix_swiglu": SwiGLUPerTokenV2(
+                    num_head=self.num_heads,
+                    in_dim=self.T * self.head_dim,
+                    out_dim=self.T * self.head_dim
+                ),
+                "mix_rms": RMSNorm(self.T * self.head_dim),
+
+                "revert_swiglu": SwiGLUPerTokenV2(
+                    num_head=self.T,
+                    in_dim=d_model,
+                    out_dim=d_model
+                ),
+                "revert_rms": RMSNorm(d_model),
+            }))
+
+    def forward(self, Q: torch.Tensor) -> torch.Tensor:
+        if self.mode == 'none':
+            return Q
+
+        B, T, D = Q.shape #[B, 16, 64]
+        X = Q
+
+        if self.in_norm:
+            X = self.in_rms(X)
+
+        for layer in self.layers:
+            # ===================== Mixing =====================
+            H_space = X.reshape(B, T, self.num_heads, self.head_dim)
+            H_space = H_space.permute(0, 2, 1, 3)
+            H_space = H_space.reshape(B, self.num_heads, T * self.head_dim)
+
+            H_mix = layer["mix_swiglu"](H_space)
+            H_next = layer["mix_rms"](H_mix + H_space)
+
+            # ===================== Reverting =====================
+            X_revert = H_next.reshape(B, self.num_heads, T, self.head_dim)
+            X_revert = X_revert.permute(0, 2, 1, 3)
+            X_revert = X_revert.reshape(B, T, D)
+
+            X_out = layer["revert_swiglu"](X_revert)
+            X = layer["revert_rms"](X_out + X)
+
+        return X
+
 
 class LongerEncoder(nn.Module):
     """Top-K compressed sequence encoder.
@@ -1072,8 +1074,6 @@ class MultiSeqHyFormerBlock(nn.Module):
         # 4. Query Boosting
         boosted = self.mixer(combined)  # (B, Nq*S + Nns, D)
 
-        #logging.info(f"boosted={boosted.shape}")
-
         # 5. Split back into per-sequence Q and NS
         next_q_list = []
         offset = 0
@@ -1307,9 +1307,6 @@ class PCVRHyFormer(nn.Module):
         user_int_feature_specs: List[Tuple[int, int, int]],
         item_int_feature_specs: List[Tuple[int, int, int]],
         user_dense_dim: int,
-        p1_dim: int,
-        p2_dim: int,
-        p3_dim: int,
         item_dense_dim: int,
         seq_vocab_sizes: "dict[str, List[int]]",  # {domain: [vocab_size_per_fid, ...]}
         # NS grouping config (grouped by fid index)
@@ -1411,30 +1408,6 @@ class PCVRHyFormer(nn.Module):
                 nn.LayerNorm(d_model),
             )
 
-            self.dense_part1_proj = nn.Sequential(
-                nn.Linear(p1_dim, d_model),
-            )
-
-            self.dense_part2_proj = nn.Sequential(
-                nn.Linear(p2_dim, d_model),
-                nn.LayerNorm(d_model),
-            )
-
-            self.p3_proj1 = nn.Sequential(
-                nn.Linear(10, d_model),
-            )
-            self.p3_proj2 = nn.Sequential(
-                nn.Linear(10, d_model),
-            )
-            self.p3_proj3 = nn.Sequential(
-                nn.Linear(10, d_model),
-            )
-
-            logging.info(
-                f"Dense feature dims: part1(预训练Emb)={p1_dim}, "
-                f"part2(原始dense)={p2_dim}, part3(3个10维向量)={p3_dim}"
-            )
-
         # Item dense feature projection (if available)
         self.has_item_dense = item_dense_dim > 0
         if self.has_item_dense:
@@ -1444,7 +1417,7 @@ class PCVRHyFormer(nn.Module):
             )
 
         # Total NS token count
-        self.num_ns = (num_user_ns + (5 if self.has_user_dense else 0)
+        self.num_ns = (num_user_ns + (1 if self.has_user_dense else 0)
                        + num_item_ns + (1 if self.has_item_dense else 0))
 
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
@@ -1771,21 +1744,8 @@ class PCVRHyFormer(nn.Module):
 
         ns_parts = [user_ns]
         if self.has_user_dense:
-            p1_tok = self.dense_part1_proj(inputs.user_dense_part1).unsqueeze(1)
-            p2_tok = self.dense_part2_proj(inputs.user_dense_part2).unsqueeze(1)
-            p3_raw = inputs.user_dense_part3
-            vec1 = p3_raw[:, :10]   # 第一个field的10维向量
-            vec2 = p3_raw[:, 10:20] # 第二个field的10维向量
-            vec3 = p3_raw[:, 20:]   # 第三个field的10维向量
-            p3_tok1 = self.p3_proj1(vec1).unsqueeze(1)
-            p3_tok2 = self.p3_proj2(vec2).unsqueeze(1)
-            p3_tok3 = self.p3_proj3(vec3).unsqueeze(1)
-            ns_parts.append(p1_tok)
-            ns_parts.append(p2_tok)
-            ns_parts.append(p3_tok1)
-            ns_parts.append(p3_tok2)
-            ns_parts.append(p3_tok3)
-
+            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)  # (B, 1, D)
+            ns_parts.append(user_dense_tok)
         ns_parts.append(item_ns)
         if self.has_item_dense:
             item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)  # (B, 1, D)

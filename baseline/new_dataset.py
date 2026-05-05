@@ -217,7 +217,7 @@ class PCVRParquetDataset(IterableDataset):
         B = batch_size
         self._buf_user_int = np.zeros((B, self.user_int_schema.total_dim), dtype=np.int64)
         self._buf_item_int = np.zeros((B, self.item_int_schema.total_dim), dtype=np.int64)
-        #self._buf_user_dense = np.zeros((B, self.user_dense_schema.total_dim), dtype=np.float32)
+        
         p1_dim = self.part1_dense_schema.total_dim
         p2_dim = self.part2_dense_schema.total_dim
         p3_dim = self.part3_dense_schema.total_dim
@@ -250,26 +250,29 @@ class PCVRParquetDataset(IterableDataset):
             self._item_int_plan.append((ci, dim, offset, vs))
             offset += dim
 
+        # ====================== 修复部分：使用 self.xxx ======================
+        # part1 plan
         self._part1_dense_plan = []
         offset = 0
-        for fid, dim in part1_cols:
+        for fid, dim in self.part1_cols:
             ci = self._col_idx.get(f'user_dense_feats_{fid}')
             self._part1_dense_plan.append((ci, dim, offset))
             offset += dim
         # part2 plan
         self._part2_dense_plan = []
         offset = 0
-        for fid, dim in part2_cols:
+        for fid, dim in self.part2_cols:
             ci = self._col_idx.get(f'user_dense_feats_{fid}')
             self._part2_dense_plan.append((ci, dim, offset))
             offset += dim
         # part3 plan
         self._part3_dense_plan = []
         offset = 0
-        for fid, dim in part3_cols:
+        for fid, dim in self.part3_cols:
             ci = self._col_idx.get(f'user_dense_feats_{fid}')
             self._part3_dense_plan.append((ci, dim, offset))
             offset += dim
+        # =====================================================================
 
         # Sequence column plan: {domain: ([(col_idx, feat_slot, vocab_size), ...], ts_col_idx)}
         self._seq_plan = {}
@@ -322,6 +325,12 @@ class PCVRParquetDataset(IterableDataset):
         part1_cols = [col for col in all_dense_cols if col[0] in DENSE_PART1_FIDS]
         part2_cols = [col for col in all_dense_cols if col[0] in DENSE_PART2_FIDS]
         part3_cols = [col for col in all_dense_cols if col[0] in DENSE_PART3_FIDS]
+
+        # ====================== 修复部分：保存到 self ======================
+        self.part1_cols = part1_cols
+        self.part2_cols = part2_cols
+        self.part3_cols = part3_cols
+        # ==================================================================
 
         # 给三个分组分别建schema
         self.part1_dense_schema: FeatureSchema = FeatureSchema()
@@ -459,7 +468,7 @@ class PCVRParquetDataset(IterableDataset):
             arr[oob_mask] = 0
         else:
             raise ValueError(
-                f"{group} col_idx={col_idx}: {n} values out of range "
+                f"{group} col_idx={ci}: {n} values out of range "
                 f"[0, {vocab_size}), actual=[{mn}, {mx}]. "
                 f"Use clip_vocab=True to clip or fix schema.json")
 

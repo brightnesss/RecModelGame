@@ -217,14 +217,7 @@ class PCVRParquetDataset(IterableDataset):
         B = batch_size
         self._buf_user_int = np.zeros((B, self.user_int_schema.total_dim), dtype=np.int64)
         self._buf_item_int = np.zeros((B, self.item_int_schema.total_dim), dtype=np.int64)
-        #self._buf_user_dense = np.zeros((B, self.user_dense_schema.total_dim), dtype=np.float32)
-        p1_dim = self.part1_dense_schema.total_dim
-        p2_dim = self.part2_dense_schema.total_dim
-        p3_dim = self.part3_dense_schema.total_dim
-        self._buf_user_dense_part1 = np.zeros((B, p1_dim), dtype=np.float32)
-        self._buf_user_dense_part2 = np.zeros((B, p2_dim), dtype=np.float32)
-        self._buf_user_dense_part3 = np.zeros((B, p3_dim), dtype=np.float32)
-
+        self._buf_user_dense = np.zeros((B, self.user_dense_schema.total_dim), dtype=np.float32)
         self._buf_seq = {}
         self._buf_seq_tb = {}
         self._buf_seq_lens = {}
@@ -250,25 +243,11 @@ class PCVRParquetDataset(IterableDataset):
             self._item_int_plan.append((ci, dim, offset, vs))
             offset += dim
 
-        self._part1_dense_plan = []
+        self._user_dense_plan = []
         offset = 0
-        for fid, dim in part1_cols:
+        for fid, dim in self._user_dense_cols:
             ci = self._col_idx.get(f'user_dense_feats_{fid}')
-            self._part1_dense_plan.append((ci, dim, offset))
-            offset += dim
-        # part2 plan
-        self._part2_dense_plan = []
-        offset = 0
-        for fid, dim in part2_cols:
-            ci = self._col_idx.get(f'user_dense_feats_{fid}')
-            self._part2_dense_plan.append((ci, dim, offset))
-            offset += dim
-        # part3 plan
-        self._part3_dense_plan = []
-        offset = 0
-        for fid, dim in part3_cols:
-            ci = self._col_idx.get(f'user_dense_feats_{fid}')
-            self._part3_dense_plan.append((ci, dim, offset))
+            self._user_dense_plan.append((ci, dim, offset))
             offset += dim
 
         # Sequence column plan: {domain: ([(col_idx, feat_slot, vocab_size), ...], ts_col_idx)}
@@ -295,11 +274,6 @@ class PCVRParquetDataset(IterableDataset):
         with open(schema_path, 'r', encoding='utf-8') as f:
             raw = json.load(f)
 
-        DENSE_PART1_FIDS = [61, 87]    # 第一组：field61 + field87
-        DENSE_PART2_FIDS = [62,63,64,65,66] # 第二组：field62~66
-        DENSE_PART3_FIDS = [89,90,91]  # 第三组：field89~91
-        ALL_DENSE_FIDS = DENSE_PART1_FIDS + DENSE_PART2_FIDS + DENSE_PART3_FIDS
-
         # ---- user_int: [[fid, vocab_size, dim], ...] ----
         self._user_int_cols: List[List[int]] = raw['user_int']
         self.user_int_schema: FeatureSchema = FeatureSchema()
@@ -317,26 +291,9 @@ class PCVRParquetDataset(IterableDataset):
             self.item_int_vocab_sizes.extend([vs] * dim)
 
         # ---- user_dense: [[fid, dim], ...] ----
-        all_dense_cols = raw['user_dense']
-        # 按fid拆分三个分组
-        part1_cols = [col for col in all_dense_cols if col[0] in DENSE_PART1_FIDS]
-        part2_cols = [col for col in all_dense_cols if col[0] in DENSE_PART2_FIDS]
-        part3_cols = [col for col in all_dense_cols if col[0] in DENSE_PART3_FIDS]
-
-        # 给三个分组分别建schema
-        self.part1_dense_schema: FeatureSchema = FeatureSchema()
-        for fid, dim in part1_cols:
-            self.part1_dense_schema.add(fid, dim)
-        self.part2_dense_schema: FeatureSchema = FeatureSchema()
-        for fid, dim in part2_cols:
-            self.part2_dense_schema.add(fid, dim)
-        self.part3_dense_schema: FeatureSchema = FeatureSchema()
-        for fid, dim in part3_cols:
-            self.part3_dense_schema.add(fid, dim)
-
-        # 保留全局schema（兼容原有逻辑）
+        self._user_dense_cols: List[List[int]] = raw['user_dense']
         self.user_dense_schema: FeatureSchema = FeatureSchema()
-        for fid, dim in all_dense_cols:
+        for fid, dim in self._user_dense_cols:
             self.user_dense_schema.add(fid, dim)
 
         # ---- item_dense (empty) ----
@@ -606,36 +563,16 @@ class PCVRParquetDataset(IterableDataset):
                 item_int[:, offset:offset + dim] = padded
 
         # ---- user_dense ----
-        user_dense_part1 = self._buf_user_dense_part1[:B]
-        user_dense_part1[:] = 0
-        for ci, dim, offset in self._part1_dense_plan:
+        user_dense = self._buf_user_dense[:B]
+        user_dense[:] = 0
+        for ci, dim, offset in self._user_dense_plan:
             col = batch.column(ci)
             padded = self._pad_varlen_float_column(col, dim, B)
-            padded = np.log1p(padded)
-            padded = np.clip(padded, 0, 20)
-            user_dense_part1[:, offset:offset + dim] = padded
-
-        # part2: field62~66
-        user_dense_part2 = self._buf_user_dense_part2[:B]
-        user_dense_part2[:] = 0
-        for ci, dim, offset in self._part2_dense_plan:
-            col = batch.column(ci)
-            padded = self._pad_varlen_float_column(col, dim, B)
-            user_dense_part2[:, offset:offset + dim] = padded
-
-        # part3: field89~91
-        user_dense_part3 = self._buf_user_dense_part3[:B]
-        user_dense_part3[:] = 0
-        for ci, dim, offset in self._part3_dense_plan:
-            col = batch.column(ci)
-            padded = self._pad_varlen_float_column(col, dim, B)
-            user_dense_part3[:, offset:offset + dim] = padded
+            user_dense[:, offset:offset + dim] = padded
 
         result = {
             'user_int_feats': torch.from_numpy(user_int.copy()),
-            'user_dense_part1': torch.from_numpy(user_dense_part1.copy()), # field61+87
-            'user_dense_part2': torch.from_numpy(user_dense_part2.copy()), # field62~66
-            'user_dense_part3': torch.from_numpy(user_dense_part3.copy()), # field89~91
+            'user_dense_feats': torch.from_numpy(user_dense.copy()),
             'item_int_feats': torch.from_numpy(item_int.copy()),
             'item_dense_feats': torch.zeros(B, 0, dtype=torch.float32),
             'label': torch.from_numpy(labels),
