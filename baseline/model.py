@@ -1188,6 +1188,26 @@ class RankMixerNSTokenizer(nn.Module):
 
         return torch.cat(tokens, dim=1)  # (B, num_ns_tokens, d_model)
 
+class SafeBatchNorm1d(nn.BatchNorm1d):
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True):
+        super().__init__(num_features, eps=eps, momentum=momentum, affine=affine, track_running_stats=track_running_stats)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # 训练模式 + batch size == 1 时，不更新统计量，避免报错
+        if self.training and self.track_running_stats and input.size(0) == 1:
+            # 保存原始状态
+            training = self.training
+            self.training = False  # 临时切换到 eval，不更新均值方差
+            
+            # 执行归一化（使用已有的 running_mean / running_var）
+            output = super().forward(input)
+            
+            # 恢复状态
+            self.training = training
+            return output
+        else:
+            # 正常情况，直接执行
+            return super().forward(input)
 
 class PCVRHyFormer(nn.Module):
     """PCVRHyFormer model for post-click conversion rate prediction.
@@ -1299,16 +1319,18 @@ class PCVRHyFormer(nn.Module):
         self.has_user_dense = user_dense_dim > 0
         if self.has_user_dense:
             self.user_dense_proj = nn.Sequential(
-                nn.Linear(user_dense_dim, d_model),
-                nn.LayerNorm(d_model),
+                SafeBatchNorm1d(user_dense_dim),  # 先对原始连续特征做BatchNorm归一化（适配连续特征的统计归一化）
+                nn.Linear(user_dense_dim, d_model),  # 再投影到模型维度
+                nn.ReLU()  # 激活函数，如果你习惯用SiLU，也可以换成 nn.SiLU()
             )
 
         # Item dense feature projection (if available)
         self.has_item_dense = item_dense_dim > 0
         if self.has_item_dense:
             self.item_dense_proj = nn.Sequential(
-                nn.Linear(item_dense_dim, d_model),
-                nn.LayerNorm(d_model),
+                SafeBatchNorm1d(user_dense_dim),  # 先对原始连续特征做BatchNorm归一化（适配连续特征的统计归一化）
+                nn.Linear(user_dense_dim, d_model),  # 再投影到模型维度
+                nn.ReLU()  # 激活函数，如果你习惯用SiLU，也可以换成 nn.SiLU()
             )
 
         # Total NS token count
@@ -1639,11 +1661,11 @@ class PCVRHyFormer(nn.Module):
 
         ns_parts = [user_ns]
         if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)  # (B, 1, D)
+            user_dense_tok = self.user_dense_proj(inputs.user_dense_feats).unsqueeze(1)  # (B, 1, D)
             ns_parts.append(user_dense_tok)
         ns_parts.append(item_ns)
         if self.has_item_dense:
-            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)  # (B, 1, D)
+            item_dense_tok = self.item_dense_proj(inputs.item_dense_feats).unsqueeze(1)  # (B, 1, D)
             ns_parts.append(item_dense_tok)
 
         ns_tokens = torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
@@ -1682,11 +1704,11 @@ class PCVRHyFormer(nn.Module):
 
         ns_parts = [user_ns]
         if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)
+            user_dense_tok = self.user_dense_proj(inputs.user_dense_feats).unsqueeze(1)
             ns_parts.append(user_dense_tok)
         ns_parts.append(item_ns)
         if self.has_item_dense:
-            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
+            item_dense_tok = self.item_dense_proj(inputs.item_dense_feats).unsqueeze(1)
             ns_parts.append(item_dense_tok)
 
         ns_tokens = torch.cat(ns_parts, dim=1)

@@ -1,1 +1,35 @@
 这是一个推荐模型Demo仓库
+
+
+
+
+输入特征：
+ModelInput(
+    # 用户/物品 离散+连续
+    user_int_feats    = batch['user_int_feats'],    # [B, U]
+    item_int_feats    = batch['item_int_feats'],    # [B, I]
+    user_dense_feats  = batch['user_dense_feats'],  # [B, D]
+    item_dense_feats  = batch['item_dense_feats'],  # [B, 0] 空
+
+    # 多序列数据
+    seq_data          = {
+        'seq_a': batch['seq_a'],        # [B, S, L]
+        'seq_b': batch['seq_b'],
+        'seq_c': batch['seq_c'],
+        'seq_d': batch['seq_d'],
+    },
+    seq_lens          = {
+        'seq_a': batch['seq_a_len'],    # [B]
+        'seq_b': batch['seq_b_len'],
+        ...
+    },
+    seq_time_buckets  = {
+        'seq_a': batch['seq_a_time_bucket'],  # [B, L]
+        'seq_b': ...,
+    }
+)
+
+
+
+
+dense特征的处理方式不合理
